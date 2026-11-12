@@ -19,12 +19,14 @@ instruction.
 
 ## Dependencies
 
-* `torch`: tested on v1.10.1+cu111
-* `transformers`: tested on v4.21.2
-* `datasets`: tested on v1.17.0
-* `modelscope`: required for ModelScope model and dataset downloads
-* `sacrebleu`: tested on v2.3.1
-* `scikit-learn`: tested on v1.0.2
+* `torch`: 2.3.0, CUDA 12.x wheel
+* `transformers`: 4.40.2
+* `datasets`: 2.19.2
+* `modelscope`: 1.18.0
+* `sentencepiece`: 0.2.0
+* `sacrebleu`: 2.3.1
+* `scikit-learn`: 1.4.2
+* Install the shared dependencies with `pip install -r ../requirements.txt`
 
 All experiments were run on a single 80GB NVIDIA A100. However, most experiments will work on a GPU with a lot less memory as well.
 

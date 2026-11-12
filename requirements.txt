@@ -1,0 +1,24 @@
+# Target: Ubuntu 22.04 / Python 3.10 / CUDA 12.x / torch 2.3.0 / ModelScope 1.18.0
+# PyTorch 2.3.0 Linux wheels ship the CUDA 12.1 runtime and are compatible with CUDA 12.x drivers.
+
+# Core runtime
+torch==2.3.0
+modelscope==1.18.0
+transformers==4.40.2
+datasets==2.19.2
+numpy==1.26.4
+scipy==1.11.4
+tqdm==4.66.4
+
+# Tokenization / model formats
+sentencepiece==0.2.0
+safetensors==0.4.3
+protobuf==4.25.3
+
+# zeroShot evaluation
+scikit-learn==1.4.2
+sacrebleu==2.3.1
+
+# CUDA extension build
+setuptools==69.5.1
+ninja==1.11.1.1

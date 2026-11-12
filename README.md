@@ -41,11 +41,12 @@ The `--act-order` heuristic also dramatically improves accuracy on the OPT-66B o
 
 ## Dependencies
 
-* `torch`: tested on v1.10.1+cu111
-* `transformers`: tested on v4.21.2 (the LLaMa integration currently requires a main install from source and `sentencepiece`)
-* `datasets`: tested on v1.17.0
-* `modelscope`: required for ModelScope model and dataset downloads
-* (to run 3-bit kernels: setup for compiling PyTorch CUDA extensions, see also https://pytorch.org/tutorials/advanced/cpp_extension.html, tested on CUDA 11.4)
+* `torch`: 2.3.0, CUDA 12.x wheel
+* `transformers`: 4.40.2
+* `datasets`: 2.19.2
+* `modelscope`: 1.18.0, used for model and dataset downloads
+* CUDA 12.1 toolkit or newer for compiling the 3-bit PyTorch CUDA extension
+* Install the Python dependencies with `pip install -r requirements.txt`
 
 All experiments were run on a single 80GB NVIDIA A100. However, most experiments will work on a GPU with a lot less memory as well.
 
