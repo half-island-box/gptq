@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 
+from modelscope_utils import load_modelscope_dataset, modelscope_model_path
+
 
 def set_seed(seed):
     np.random.seed(seed)
@@ -8,12 +10,11 @@ def set_seed(seed):
 
 
 def get_wikitext2(nsamples, seed, seqlen, model):
-    from datasets import load_dataset
-    traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
-    testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
+    traindata = load_modelscope_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
+    testdata = load_modelscope_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
 
     from transformers import AutoTokenizer 
-    tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(modelscope_model_path(model), use_fast=False)
     trainenc = tokenizer("\n\n".join(traindata['text']), return_tensors='pt')
     testenc = tokenizer("\n\n".join(testdata['text']), return_tensors='pt')
 
@@ -30,12 +31,11 @@ def get_wikitext2(nsamples, seed, seqlen, model):
     return trainloader, testenc
 
 def get_ptb(nsamples, seed, seqlen, model):
-    from datasets import load_dataset
-    traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train')
-    valdata = load_dataset('ptb_text_only', 'penn_treebank', split='validation')
+    traindata = load_modelscope_dataset('ptb_text_only', 'penn_treebank', split='train')
+    valdata = load_modelscope_dataset('ptb_text_only', 'penn_treebank', split='validation')
 
     from transformers import AutoTokenizer 
-    tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(modelscope_model_path(model), use_fast=False)
     trainenc = tokenizer("\n\n".join(traindata['sentence']), return_tensors='pt')
     testenc = tokenizer("\n\n".join(valdata['sentence']), return_tensors='pt')
 
@@ -52,16 +52,17 @@ def get_ptb(nsamples, seed, seqlen, model):
     return trainloader, testenc
 
 def get_c4(nsamples, seed, seqlen, model):
-    from datasets import load_dataset
-    traindata = load_dataset(
-        'allenai/c4', 'allenai--c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train'
+    c4_train_file = {'train': 'en/c4-train.00000-of-01024.json.gz'}
+    c4_validation_file = {'validation': 'en/c4-validation.00000-of-00008.json.gz'}
+    traindata = load_modelscope_dataset(
+        'allenai/c4', 'en', data_files=c4_train_file, split='train'
     )
-    valdata = load_dataset(
-        'allenai/c4', 'allenai--c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation'
+    valdata = load_modelscope_dataset(
+        'allenai/c4', 'en', data_files=c4_validation_file, split='validation'
     )
 
     from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(modelscope_model_path(model), use_fast=False)
 
     import random
     random.seed(seed)
@@ -100,12 +101,11 @@ def get_c4(nsamples, seed, seqlen, model):
     return trainloader, valenc 
 
 def get_ptb_new(nsamples, seed, seqlen, model):
-    from datasets import load_dataset
-    traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train')
-    testdata = load_dataset('ptb_text_only', 'penn_treebank', split='test')
+    traindata = load_modelscope_dataset('ptb_text_only', 'penn_treebank', split='train')
+    testdata = load_modelscope_dataset('ptb_text_only', 'penn_treebank', split='test')
 
     from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(modelscope_model_path(model), use_fast=False)
     trainenc = tokenizer(" ".join(traindata['sentence']), return_tensors='pt')
     testenc = tokenizer(" ".join(testdata['sentence']), return_tensors='pt')
 
@@ -122,16 +122,17 @@ def get_ptb_new(nsamples, seed, seqlen, model):
     return trainloader, testenc
 
 def get_c4_new(nsamples, seed, seqlen, model):
-    from datasets import load_dataset
-    traindata = load_dataset(
-        'allenai/c4', 'allenai--c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train'
+    c4_train_file = {'train': 'en/c4-train.00000-of-01024.json.gz'}
+    c4_validation_file = {'validation': 'en/c4-validation.00000-of-00008.json.gz'}
+    traindata = load_modelscope_dataset(
+        'allenai/c4', 'en', data_files=c4_train_file, split='train'
     )
-    valdata = load_dataset(
-        'allenai/c4', 'allenai--c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation'
+    valdata = load_modelscope_dataset(
+        'allenai/c4', 'en', data_files=c4_validation_file, split='validation'
     )
 
     from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(modelscope_model_path(model), use_fast=False)
 
     import random
     random.seed(seed)

@@ -7,6 +7,7 @@ import transformers
 
 from gptq import * 
 from modelutils import *
+from modelscope_utils import modelscope_model_path
 from quant import *
 
 
@@ -18,7 +19,7 @@ def get_bloom(model):
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
     from transformers import BloomForCausalLM
-    model = BloomForCausalLM.from_pretrained(model, torch_dtype='auto')
+    model = BloomForCausalLM.from_pretrained(modelscope_model_path(model), torch_dtype='auto')
     model.seqlen = 2048
     return model
 

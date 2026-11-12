@@ -8,6 +8,7 @@ import torch
 from tqdm import tqdm
 from .quant import *
 from .gptq import GPTQ
+from modelscope_utils import modelscope_model_path
 
 
 class BLOOMClass(BaseLM):
@@ -20,12 +21,12 @@ class BLOOMClass(BaseLM):
         self.model_name = args.model
         self.batch_size_per_gpu = args.batch_size
 
-        self.model = BloomForCausalLM.from_pretrained(self.model_name, torch_dtype='auto')
+        self.model = BloomForCausalLM.from_pretrained(modelscope_model_path(self.model_name), torch_dtype='auto')
         self.model.eval()
         self.seqlen = 2048
 
         # pretrained tokenizer for neo is broken for now so just hard-coding this to gpt2
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=False)
+        self.tokenizer = AutoTokenizer.from_pretrained(modelscope_model_path(self.model_name), use_fast=False)
 
         self.vocab_size = self.tokenizer.vocab_size
         print('BLOOM vocab size: ', self.vocab_size)

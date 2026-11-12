@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from gptq import *
 from modelutils import *
+from modelscope_utils import modelscope_model_path
 from quant import *
 
 
@@ -16,7 +17,7 @@ def get_opt(model):
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
     from transformers import OPTForCausalLM
-    model = OPTForCausalLM.from_pretrained(model, torch_dtype='auto')
+    model = OPTForCausalLM.from_pretrained(modelscope_model_path(model), torch_dtype='auto')
     model.seqlen = model.config.max_position_embeddings
     return model
 
@@ -243,7 +244,7 @@ def opt_pack3(model, quantizers):
 
 def load_quant3(model, checkpoint):
     from transformers import OPTConfig, OPTForCausalLM 
-    config = OPTConfig.from_pretrained(model)
+    config = OPTConfig.from_pretrained(modelscope_model_path(model))
     def noop(*args, **kwargs):
         pass
     torch.nn.init.kaiming_uniform_ = noop 

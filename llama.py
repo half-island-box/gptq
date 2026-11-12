@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from gptq import *
 from modelutils import *
+from modelscope_utils import modelscope_model_path
 from quant import *
 
 
@@ -16,7 +17,7 @@ def get_llama(model):
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
     from transformers import LlamaForCausalLM
-    model = LlamaForCausalLM.from_pretrained(model, torch_dtype='auto')
+    model = LlamaForCausalLM.from_pretrained(modelscope_model_path(model), torch_dtype='auto')
     model.seqlen = 2048
     return model
 

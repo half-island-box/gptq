@@ -1,8 +1,10 @@
 import abc
 import math
+from pathlib import Path
 import datasets
 import inspect
 import functools
+from modelscope_utils import load_modelscope_dataset
 import numpy as np
 from abc import abstractmethod
 import sklearn
@@ -164,13 +166,32 @@ class Task(abc.ABC):
             - `datasets.DownloadMode.FORCE_REDOWNLOAD`
                 Fresh download and fresh dataset.
         """
-        self.dataset = datasets.load_dataset(
-            path=self.DATASET_PATH,
-            name=self.DATASET_NAME,
-            data_dir=data_dir,
-            cache_dir=cache_dir,
-            download_mode=download_mode,
-        )
+        if data_dir and Path(data_dir).exists():
+            # Task data was supplied locally (for example, StoryCloze).
+            self.dataset = datasets.load_dataset(
+                path=self.DATASET_PATH,
+                name=self.DATASET_NAME,
+                data_dir=data_dir,
+                cache_dir=cache_dir,
+                download_mode=download_mode,
+            )
+        elif Path(self.DATASET_PATH).exists():
+            # LAMBADA and other checked-in loaders remain local datasets.
+            self.dataset = datasets.load_dataset(
+                path=self.DATASET_PATH,
+                name=self.DATASET_NAME,
+                data_dir=data_dir,
+                cache_dir=cache_dir,
+                download_mode=download_mode,
+            )
+        else:
+            self.dataset = load_modelscope_dataset(
+                self.DATASET_PATH,
+                self.DATASET_NAME,
+                data_dir=data_dir,
+                cache_dir=cache_dir,
+                download_mode=download_mode,
+            )
 
     def should_decontaminate(self):
         """Whether this task supports decontamination against model training set."""

@@ -22,6 +22,7 @@ instruction.
 * `torch`: tested on v1.10.1+cu111
 * `transformers`: tested on v4.21.2
 * `datasets`: tested on v1.17.0
+* `modelscope`: required for ModelScope model and dataset downloads
 * `sacrebleu`: tested on v2.3.1
 * `scikit-learn`: tested on v1.0.2
 
