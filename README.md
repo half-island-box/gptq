@@ -87,10 +87,11 @@ See `zeroShot/` folder.
 ## 3-bit CUDA Kernels 
 
 ```
-# Install kernels
+# Install kernels (a CUDA 12.x nvcc must be available)
 python setup_cuda.py install
 
-# Benchmark performance for FC2 layer of OPT-175B
+# Benchmark and verify the kernels. If no GPU is visible during the build,
+# set TORCH_CUDA_ARCH_LIST to the target compute capability first.
 CUDA_VISIBLE_DEVICES=0 python test_kernel.py
 
 # Benchmark language generation with 3-bit OPT-175B:

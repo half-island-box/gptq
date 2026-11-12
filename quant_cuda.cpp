@@ -16,7 +16,7 @@ void vecquant3matmul(
   torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
   torch::Tensor scales, torch::Tensor zeros
 ) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
+  const at::cuda::OptionalCUDAGuard device_guard(vec.device());
   vecquant3matmul_cuda(vec, mat, mul, scales, zeros);
 }
 
@@ -24,7 +24,7 @@ void vecquant3matmul_faster(
   torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
   torch::Tensor scales, torch::Tensor zeros
 ) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
+  const at::cuda::OptionalCUDAGuard device_guard(vec.device());
   vecquant3matmul_faster_cuda(vec, mat, mul, scales, zeros);
 }
 

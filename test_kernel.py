@@ -47,6 +47,7 @@ COUNT = 1000
 import time
 tick = time.time()
 for _ in range(COUNT):
+    vec = vec.half()
     quant_cuda.vecquant3matmul_faster(vec, mat, mul, scales, zeros)
     torch.cuda.synchronize()
 print('3bit:', (time.time() - tick) / COUNT, '(faster)')
@@ -74,7 +75,14 @@ qlayer = qlayer.to(DEV)
 layer = layer.to(DEV)
 
 with torch.no_grad():
-    print('Simu:', layer.to(DEV)(vec))
-    print('Kern:', qlayer(vec))
+    expected = layer.to(DEV)(vec)
+    actual = qlayer(vec)
+    error = (actual - expected).abs().max().item()
+    print(f'Kernel max error: {error:.6g}')
+    torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
+
     qlayer.faster = True
-    print('Kern:', qlayer(vec.half()), '(faster)')
+    actual_faster = qlayer(vec.half())
+    error = (actual_faster.float() - expected).abs().max().item()
+    print(f'Faster kernel max error: {error:.6g}')
+    torch.testing.assert_close(actual_faster.float(), expected, rtol=2e-2, atol=2e-2)

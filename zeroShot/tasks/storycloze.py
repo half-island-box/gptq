@@ -6,6 +6,9 @@ understanding, story generation, and script learning. This test requires a syste
 to choose the correct ending to a four-sentence story.
 Homepage: https://cs.rochester.edu/nlp/rocstories/
 """
+from pathlib import Path
+
+import datasets
 import numpy as np
 from .tasks_utils import Task, rf
 from .tasks_utils import mean
@@ -35,7 +38,7 @@ class StoryCloze(Task):
     DATASET_PATH = "story_cloze"
     DATASET_NAME = None
 
-    def __init__(self, data_dir: str='tasks/local_datasets/storyCloze2018'):
+    def __init__(self, data_dir: str=None):
 
         """
         StoryCloze is not publicly available. You must download the data by
@@ -43,6 +46,8 @@ class StoryCloze(Task):
         path into the `data_dir` arg.
         """
         print("PLEASE MAKE SURE TO FILL THIS FORM BEFORE USING THE DATASET: https://cs.rochester.edu/nlp/rocstories/")
+        if data_dir is None:
+            data_dir = str(Path(__file__).parent / "local_datasets" / "storyCloze2018")
         super().__init__(data_dir=data_dir)
 
     def has_training_docs(self):
@@ -53,6 +58,33 @@ class StoryCloze(Task):
 
     def has_test_docs(self):
         return False
+
+    def download(self, data_dir=None, cache_dir=None, download_mode=None):
+        """Load the locally supplied StoryCloze CSV with the modern CSV loader."""
+        directory = Path(data_dir or "tasks/local_datasets/storyCloze2018")
+        csv_files = list(directory.glob("*.csv"))
+        if not csv_files:
+            raise FileNotFoundError(f"No StoryCloze CSV file found in {directory}")
+
+        column_map = {
+            "InputSentence1": "input_sentence_1",
+            "InputSentence2": "input_sentence_2",
+            "InputSentence3": "input_sentence_3",
+            "InputSentence4": "input_sentence_4",
+            "RandomFifthSentenceQuiz1": "sentence_quiz1",
+            "RandomFifthSentenceQuiz2": "sentence_quiz2",
+            "AnswerRightEnding": "answer_right_ending",
+        }
+        loaded = datasets.load_dataset(
+            "csv",
+            data_files={"validation": [str(path) for path in csv_files]},
+            cache_dir=cache_dir,
+            download_mode=download_mode,
+        )
+        self.dataset = {
+            split: dataset.rename_columns(column_map)
+            for split, dataset in loaded.items()
+        }
 
     def training_docs(self):
         pass
