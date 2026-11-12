@@ -1,4 +1,7 @@
+import csv
 import time
+from datetime import datetime
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -227,6 +230,7 @@ def opt_eval(model, testenc, dev):
     print(ppl.item())
 
     model.config.use_cache = use_cache
+    return ppl.item()
 
 # TODO: perform packing on GPU
 def opt_pack3(model, quantizers):
@@ -241,6 +245,36 @@ def opt_pack3(model, quantizers):
         qlayers[name].pack(layers[name], quantizers[name].scale, quantizers[name].zero)
     print('Done.')
     return model
+
+def append_ppl_result(args, dataset, ppl):
+    """Append one evaluated PPL result to a CSV file."""
+    if args.wbits == 16:
+        quant_method = 'FP16'
+    elif args.nearest:
+        quant_method = 'RTN'
+    else:
+        quant_method = 'GPTQ'
+
+    fieldnames = [
+        'timestamp', 'model_name', 'quant_bits', 'quant_method', 'dataset', 'ppl'
+    ]
+    result = {
+        'timestamp': datetime.now().isoformat(timespec='seconds'),
+        'model_name': args.model,
+        'quant_bits': args.wbits,
+        'quant_method': quant_method,
+        'dataset': dataset,
+        'ppl': format(ppl, '.12g'),
+    }
+
+    output_exists = Path(args.results_csv).exists()
+    with open(args.results_csv, 'a', newline='', encoding='utf-8') as output:
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        if not output_exists:
+            writer.writeheader()
+        writer.writerow(result)
+    print(f'Saved result to {args.results_csv}')
+
 
 def load_quant3(model, checkpoint):
     from transformers import OPTConfig, OPTForCausalLM 
@@ -418,6 +452,10 @@ if __name__ == '__main__':
         help='Whether to compute perplexity during benchmarking for verification.'
     )
     parser.add_argument(
+        '--results-csv', type=str, default='results.csv',
+        help='CSV file for appending model, quantization, dataset, and PPL results.'
+    )
+    parser.add_argument(
         '--new-eval', action='store_true',
         help='Whether to use the new PTB and C4 eval.'
     )
@@ -471,7 +509,8 @@ if __name__ == '__main__':
             dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
         )
         print(dataset)
-        opt_eval(model, testloader, DEV)
+        ppl = opt_eval(model, testloader, DEV)
+        append_ppl_result(args, dataset, ppl)
 
     if args.save:
         opt_pack3(model, quantizers)
