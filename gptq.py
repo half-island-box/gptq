@@ -26,7 +26,7 @@ class GPTQ:
             W = W.t()
         self.rows = W.shape[0]
         self.columns = W.shape[1]
-        self.H = torch.zeros((self.columns, self.columns), device=self.dev)
+        self.H = torch.zeros((self.columns, self.columns), device=self.dev) # Hessian矩阵
         self.nsamples = 0
 
     def add_batch(self, inp, out):
@@ -34,13 +34,14 @@ class GPTQ:
             self.inp1 = inp
             self.out1 = out
         if len(inp.shape) == 2:
-            inp = inp.unsqueeze(0)
+            inp = inp.unsqueeze(0) # 补充一个batch维度，统一3D处理
         tmp = inp.shape[0]
         if isinstance(self.layer, nn.Linear) or isinstance(self.layer, transformers.Conv1D):
             if len(inp.shape) == 3:
-                inp = inp.reshape((-1, inp.shape[-1]))
-            inp = inp.t()
-        if isinstance(self.layer, nn.Conv2d):
+                inp = inp.reshape((-1, inp.shape[-1])) # [b, s, h] -> [b*s, h]
+            inp = inp.t() # [b*s, h] -> [h, b*s]
+
+        if isinstance(self.layer, nn.Conv2d): # 卷积层展开为Linear
             unfold = nn.Unfold(
                 self.layer.kernel_size,
                 dilation=self.layer.dilation,
@@ -50,7 +51,8 @@ class GPTQ:
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
-        self.H *= self.nsamples / (self.nsamples + tmp)
+
+        self.H *= self.nsamples / (self.nsamples + tmp) # 流式在线更新Hessian
         self.nsamples += tmp
         # inp = inp.float()
         inp = math.sqrt(2 / self.nsamples) * inp.float()
@@ -148,7 +150,8 @@ class GPTQ:
                 print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
                 print(torch.sum(Losses))
 
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         print('time %.2f' % (time.time() - tick))
         print('error', torch.sum(Losses).item())
 

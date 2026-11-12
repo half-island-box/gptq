@@ -4,6 +4,7 @@ This repository contains the code for the ICLR 2023 paper [GPTQ: Accurate Post-t
 The current release includes the following features:
 
 * An efficient implementation of the GPTQ algorithm: `gptq.py`
+* Selectable INT4 quantization methods — RTN / GPTQ / AWQ / AWQ+GPTQ (`--quant_method`): `awq.py`, `quant_methods.py`
 * Compressing all models from the OPT and BLOOM families to 2/3/4 bits, including weight grouping: `opt.py`, `bloom.py`, `zeroShot/`
 * Evaluating the perplexity of quantized models on several language generation tasks: `opt.py`, `bloom.py`
 * Evaluating the performance of quantized models on several ZeroShot tasks: `zeroShot/`
@@ -37,7 +38,66 @@ Here is a sample command:
 python llama.py LLAMA_HF_FOLDER c4 --wbits 4 --true-sequential --act-order --new-eval
 ```
 
+Run FP16, RTN, and GPTQ sequentially for Llama-7B. The model is read from a local
+checkpoint path when one is given, from the local ModelScope cache when available,
+and otherwise downloaded from ModelScope. The default `llama-7b` alias first uses
+the verified mirror `shakechen/Llama-2-7b-hf`, with fallbacks for other caches:
+
+```
+CUDA_VISIBLE_DEVICES=0 python run_llama_experiments.py c4 --wbits 4 --true-sequential --act-order --new-eval
+```
+
 The `--act-order` heuristic also dramatically improves accuracy on the OPT-66B outlier model: 9.55 to 9.34 and 14.16 to 9.95 PPL on Wiki2 for 4bit and 3bit, respectively.
+
+## Selectable INT4 Methods: RTN / GPTQ / AWQ
+
+`--quant_method` chooses how the INT4 weights are produced. All four methods share the
+same quantization semantics (`quant.py:Quantizer`), the same calibration data and the same
+evaluation path, so their perplexities are directly comparable.
+
+| `--quant_method` | Weight pre-processing | Needs calibration | Extra cost per layer |
+|:--|:--|:--|:--|
+| `rtn` | none (round-to-nearest, group-wise) | no | none |
+| `gptq` (default) | none; Hessian-based column compensation | yes (`--nsamples`, 128) | 1 forward pass + Cholesky |
+| `awq` | AWQ equivalent scaling + weight clipping, then group-wise RTN | yes (`--awq-calib-samples`, 16) | 20 forward passes per scale grid + clip search |
+| `awq_gptq` | AWQ equivalent scaling + clipping, then GPTQ | yes (128 + 16) | as above, plus GPTQ |
+
+Notes:
+
+* `--nearest` is kept as an alias of `--quant_method rtn`, and `--wbits 4` without
+  `--quant_method` still means GPTQ — existing commands behave exactly as before.
+* AWQ is a port of [llm-awq](https://github.com/mit-han-lab/llm-awq) (`awq.py`). It
+  searches a per-input-channel scale `s` (grid search over `s = mean(|x|)^alpha`,
+  minimizing the block output MSE), folds `s` into the preceding LayerNorm / Linear /
+  activation, searches an activation-aware weight clipping range, and only then quantizes.
+  Only the weight-preprocessing part is ported: the INT4 format, packing and kernels are
+  unchanged.
+* `--awq-calib-samples` (default 16) sets how many calibration samples feed the AWQ
+  search, `--awq-n-grid` (default 20) the alpha grid size, `--awq-no-clip` skips the
+  clipping search.
+* `--true-sequential`, `--act-order` and `--static-groups` only affect the GPTQ step:
+  they are ignored by `rtn`/`awq` and honoured by `gptq`/`awq_gptq`.
+* `--save` (3-bit packing) currently requires `--groupsize -1`.
+* The scripts under `zeroShot/` keep their own copies of the OPT/BLOOM drivers and only
+  support the RTN (`--nearest`) and GPTQ paths.
+
+```bash
+# one method at a time (OPT)
+CUDA_VISIBLE_DEVICES=0 python opt.py facebook/opt-125m c4 --wbits 4 --quant_method rtn
+CUDA_VISIBLE_DEVICES=0 python opt.py facebook/opt-125m c4 --wbits 4 --quant_method gptq --groupsize 128
+CUDA_VISIBLE_DEVICES=0 python opt.py facebook/opt-125m c4 --wbits 4 --quant_method awq  --groupsize 128
+CUDA_VISIBLE_DEVICES=0 python opt.py facebook/opt-125m c4 --wbits 4 --quant_method awq_gptq --groupsize 128
+
+# LLaMA / BLOOM
+CUDA_VISIBLE_DEVICES=0 python llama.py LLAMA_HF_FOLDER c4 --wbits 4 --quant_method awq --groupsize 128 --true-sequential --act-order --new-eval
+CUDA_VISIBLE_DEVICES=0 python bloom.py bigscience/bloom-560m c4 --wbits 4 --quant_method awq --groupsize 128
+
+# FP16 / RTN / GPTQ / AWQ in one shot (shared results.csv)
+CUDA_VISIBLE_DEVICES=0 python run_llama_experiments.py c4 --wbits 4 --true-sequential --act-order --new-eval
+
+# CPU-only sanity check of the RTN/GPTQ/AWQ plumbing (no checkpoint needed)
+python test_awq.py
+```
 
 ## Dependencies
 
@@ -66,6 +126,9 @@ CUDA_VISIBLE_DEVICES=0 python opt.py facebook/opt-125m c4 --wbits 4 [--groupsize
 To run other OPT models replace `opt-125m` with one of: `opt-350m`, `opt-1.3b`, `opt-2.7b`, `opt-6.7b`, `opt-13b`, `opt-66b`.
 For the 175B-parameter mode, you have to request access from Meta and then convert it to a local HuggingFace checkpoint using their scripts in `metaseq`.
 Once you have such a checkpoint, simply pass its path instead of `facebook/opt-125m`. 
+
+AWQ (and AWQ+GPTQ) uses the same command with `--quant_method awq` / `--quant_method awq_gptq`;
+see [Selectable INT4 Methods](#selectable-int4-methods-rtn--gptq--awq).
 
 ### BLOOM
 

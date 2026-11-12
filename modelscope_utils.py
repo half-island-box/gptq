@@ -3,6 +3,20 @@ import os
 from pathlib import Path
 
 
+# Try these ModelScope mirrors when the short experiment alias is requested.
+_MODEL_ALIASES = {
+    "llama-7b": (
+        # Verified ModelScope mirrors; shakechen avoids downloading duplicate
+        # pickle weights by requesting only its safetensors files below.
+        "shakechen/Llama-2-7b-hf",
+        "vllm-ascend/Llama-2-7b-hf",
+        # Keep older cache IDs discoverable even though their remote mirrors 404.
+        "LLM-Research/llama-2-7b-hf",
+        "AI-ModelScope/llama-2-7b-hf",
+    )
+}
+
+
 _DATASET_IDS = {
     "wikitext": "modelscope/wikitext",
     "ptb_text_only": "torushy/flm-ptb-text-only",
@@ -14,20 +28,43 @@ _DATASET_IDS = {
 }
 
 
-def modelscope_model_path(model):
-    """Return a local model path, downloading the model from ModelScope."""
+def modelscope_model_path(model, cache_dir=None, force_download=False):
+    """Return a local model path, preferring local files over ModelScope."""
     if Path(model).exists():
         return model
 
+    candidates = _MODEL_ALIASES.get(model.lower(), (model,))
+    if not force_download:
+        for candidate in candidates:
+            cached = _find_modelscope_model_snapshot(candidate, cache_dir)
+            if cached is not None:
+                print(f"Using cached ModelScope model snapshot: {cached}")
+                return str(cached)
+
     from modelscope import snapshot_download
 
-    return snapshot_download(model)
+    errors = []
+    for candidate in candidates:
+        try:
+            allow_patterns = None
+            if candidate == "shakechen/Llama-2-7b-hf":
+                allow_patterns = [
+                    "*.safetensors", "*.json", "tokenizer.model",
+                    "LICENSE.txt", "USE_POLICY.md",
+                ]
+            kwargs = {"cache_dir": cache_dir}
+            if allow_patterns is not None:
+                kwargs["allow_patterns"] = allow_patterns
+            return snapshot_download(candidate, **kwargs)
+        except Exception as error:
+            errors.append(f"{candidate}: {error}")
+    raise RuntimeError(
+        "Could not load a ModelScope model; tried:\n" + "\n".join(errors)
+    )
 
 
-def _modelscope_dataset_cache_roots(cache_dir):
-    """Return plausible ModelScope dataset-cache roots, most specific first."""
-    import os
-
+def _modelscope_cache_roots(cache_dir=None):
+    """Return plausible ModelScope cache roots, most specific first."""
     paths = []
     env_roots = [
         cache_dir,
@@ -50,12 +87,69 @@ def _modelscope_dataset_cache_roots(cache_dir):
     return paths
 
 
+def _find_modelscope_model_snapshot(model, cache_dir=None):
+    """Find a usable local ModelScope model snapshot without network I/O."""
+    model_path = Path(model)
+
+    def has_weights(snapshot):
+        if not (snapshot / "config.json").is_file():
+            return False
+
+        def complete_index(index_name):
+            index_path = snapshot / index_name
+            if not index_path.is_file() or index_path.stat().st_size == 0:
+                return False
+            try:
+                import json
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                required = set(index.get("weight_map", {}).values())
+            except (OSError, ValueError, TypeError):
+                return False
+            return bool(required) and all(
+                (snapshot / name).is_file() and (snapshot / name).stat().st_size > 0
+                for name in required
+            )
+
+        if complete_index("model.safetensors.index.json"):
+            return True
+        if complete_index("pytorch_model.bin.index.json"):
+            return True
+
+        candidates = [
+            *snapshot.glob("*.safetensors"),
+            *snapshot.glob("pytorch_model*.bin"),
+            *snapshot.glob("*.pth"),
+        ]
+        return any(path.is_file() and path.stat().st_size > 0 for path in candidates)
+
+    for cache_root in _modelscope_cache_roots(cache_dir):
+        legacy_path = None
+        if len(model_path.parts) == 2:
+            owner, name = model_path.parts
+            legacy_path = Path(f"{owner}___{name}")
+        roots = [
+            cache_root / "models" / model_path,
+            cache_root / "models" / legacy_path if legacy_path else None,
+            cache_root / model_path,
+            cache_root / legacy_path if legacy_path else None,
+        ]
+        roots = [root for root in roots if root is not None]
+        if cache_root.name == model_path.name:
+            roots.append(cache_root)
+        for model_root in roots:
+            candidates = [path for path in model_root.iterdir() if path.is_dir()] if model_root.is_dir() else []
+            for snapshot in candidates:
+                if has_weights(snapshot):
+                    return snapshot
+    return None
+
+
 def _find_modelscope_dataset_snapshot(dataset_id, relative_files, cache_dir=None):
     """Find a complete local ModelScope dataset snapshot without network I/O."""
     dataset_path = Path(dataset_id)
     searched_dataset_roots = []
 
-    for cache_root in _modelscope_dataset_cache_roots(cache_dir):
+    for cache_root in _modelscope_cache_roots(cache_dir):
         # Common ModelScope layouts:
         #   <cache>/hub/datasets/<owner>/<dataset>/<revision>/<file>
         #   <cache>/datasets/<owner>/<dataset>/<revision>/<file>

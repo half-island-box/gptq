@@ -10,6 +10,7 @@ from gptq import *
 from modelutils import *
 from modelscope_utils import modelscope_model_path
 from quant import *
+from quant_methods import add_method_args, check_save_supported, quantize_block, resolve_method
 
 
 def get_opt(model):
@@ -81,41 +82,19 @@ def opt_sequential(model, dataloader, dev):
     for i in range(len(layers)):
         layer = layers[i].to(dev)
 
-        subset = find_layers(layer)
-        gptq = {}
-        for name in subset:
-            gptq[name] = GPTQ(subset[name])
-            gptq[name].quantizer = Quantizer()
-            gptq[name].quantizer.configure(
-                args.wbits, perchannel=True, sym=args.sym, mse=False, trits=args.trits
-            )
+        def fwd(x, layer=layer):
+            return layer(x, attention_mask=attention_mask)[0]
 
-        def add_batch(name):
-            def tmp(_, inp, out):
-                gptq[name].add_batch(inp[0].data, out.data)
-            return tmp
-        handles = []
-        for name in subset:
-            handles.append(subset[name].register_forward_hook(add_batch(name)))
-        for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
-        for h in handles:
-            h.remove()
-
-        for name in subset:
-            print(i, name)
-            print('Quantizing ...')
-            gptq[name].fasterquant(
-                percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
-            )
-            quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
-            gptq[name].free()
-        for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+        # 统一驱动：标定(可选) -> AWQ 等价变换(可选) -> 量化 -> 重算该层输出
+        layer_quantizers = quantize_block(
+            layer, inps, outs, fwd, args.quant_method, args,
+            layer_idx=i, layer_kwargs={'attention_mask': attention_mask},
+        )
+        for name, quantizer in layer_quantizers.items():
+            quantizers['model.decoder.layers.%d.%s' % (i, name)] = quantizer
 
         layers[i] = layer.cpu()
         del layer
-        del gptq 
         torch.cuda.empty_cache()
 
         inps, outs = outs, inps
@@ -183,19 +162,7 @@ def opt_eval(model, testenc, dev):
         print(i)
         layer = layers[i].to(dev)
 
-        if args.nearest:
-            subset = find_layers(layer)
-            for name in subset:
-                quantizer = Quantizer()
-                quantizer.configure(
-                    args.wbits, perchannel=True, sym=args.sym, mse=False
-                )
-                W = subset[name].weight.data
-                quantizer.find_params(W, weight=True)
-                subset[name].weight.data = quantize(
-                    W, quantizer.scale, quantizer.zero, quantizer.maxq
-                ).to(next(iter(layer.parameters())).dtype)
-
+        # 量化（含 RTN 基线）已在 opt_sequential 中完成，这里只做前向
         for j in range(nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
         layers[i] = layer.cpu()
@@ -250,10 +217,8 @@ def append_ppl_result(args, dataset, ppl):
     """Append one evaluated PPL result to a CSV file."""
     if args.wbits == 16:
         quant_method = 'FP16'
-    elif args.nearest:
-        quant_method = 'RTN'
     else:
-        quant_method = 'GPTQ'
+        quant_method = args.quant_method.upper()
 
     fieldnames = [
         'timestamp', 'model_name', 'quant_bits', 'quant_method', 'dataset', 'ppl'
@@ -400,7 +365,7 @@ if __name__ == '__main__':
         help='OPT model to load; pass `facebook/opt-X`.'
     )
     parser.add_argument(
-        'dataset', type=str, choices=['wikitext2', 'ptb', 'c4'],
+        'dataset', type=str, choices=['wikitext2', 'ptb', 'c4'], # c4用来抽取部分数据做校准，其余用来测量PPL困惑度
         help='Where to extract calibration data from.'
     )
     parser.add_argument(
@@ -421,7 +386,7 @@ if __name__ == '__main__':
     ) 
     parser.add_argument(
         '--wbits', type=int, default=16, choices=[2, 3, 4, 16],
-        help='#bits to use for quantization; use 16 for evaluating base model.'
+        help='#bits to use for quantization; use 16 for evaluating base model.' # 量化后参数的bit数
     )
     parser.add_argument(
         '--trits', action='store_true',
@@ -471,8 +436,16 @@ if __name__ == '__main__':
         '--static-groups', action='store_true',
         help='Whether to use static groups; recommended when using `--actorder` for more efficient inference.'
     )
+    add_method_args(parser)
 
     args = parser.parse_args()
+    try:
+        # --nearest / --quant_method 归一化：rtn / gptq / awq / awq_gptq
+        args.quant_method = resolve_method(args)
+        # 尽早检查 --save（3-bit 打包）与所选方法/分组是否兼容，避免量化跑完才报错
+        check_save_supported(args, args.quant_method)
+    except NotImplementedError as err:
+        parser.error(str(err))
 
     if args.load:
         model = load_quant3(args.model, args.load)
@@ -484,7 +457,7 @@ if __name__ == '__main__':
         args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
     )
 
-    if args.wbits < 16 and not args.nearest:
+    if args.wbits < 16:
         tick = time.time()
         quantizers = opt_sequential(model, dataloader, DEV)
         print(time.time() - tick)

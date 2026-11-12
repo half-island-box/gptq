@@ -9,6 +9,7 @@ from gptq import *
 from modelutils import *
 from modelscope_utils import modelscope_model_path
 from quant import *
+from quant_methods import add_method_args, check_save_supported, quantize_block, resolve_method
 
 
 def get_bloom(model):
@@ -74,37 +75,19 @@ def bloom_sequential(model, dataloader, dev, means=None, stds=None):
     for i in range(len(layers)):
         layer = layers[i].to(dev)
 
-        subset = find_layers(layer)
-        gptq = {}
-        for name in subset:
-            gptq[name] = GPTQ(subset[name])
-            gptq[name].quantizer = Quantizer()
-            gptq[name].quantizer.configure(
-                args.wbits, perchannel=True, sym=args.sym, mse=False
-            )
+        def fwd(x, layer=layer):
+            return layer(x, attention_mask=attention_mask, alibi=alibi)[0]
 
-        def add_batch(name):
-            def tmp(_, inp, out):
-                gptq[name].add_batch(inp[0].data, out.data)
-            return tmp
-        handles = []
-        for name in subset:
-            handles.append(subset[name].register_forward_hook(add_batch(name)))
-        for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, alibi=alibi)[0]
-        for h in handles:
-            h.remove()
-
-        for name in subset:
-            print(i, name)
-            print('Quantizing ...')
-            gptq[name].fasterquant(percdamp=args.percdamp, groupsize=args.groupsize)
-            quantizers['transformer.h.%d.%s' % (i, name)] = gptq[name].quantizer
-        for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, alibi=alibi)[0]
+        # 统一驱动：标定(可选) -> AWQ 等价变换(可选) -> 量化 -> 重算该层输出
+        layer_quantizers = quantize_block(
+            layer, inps, outs, fwd, args.quant_method, args,
+            layer_idx=i,
+            layer_kwargs={'attention_mask': attention_mask, 'alibi': alibi},
+        )
+        for name, quantizer in layer_quantizers.items():
+            quantizers['transformer.h.%d.%s' % (i, name)] = quantizer
 
         layers[i] = layer.cpu()
-        del gptq 
         torch.cuda.empty_cache()
 
         inps, outs = outs, inps
@@ -166,19 +149,7 @@ def bloom_eval(model, testenc, dev):
         print(i)
         layer = layers[i].to(dev)
 
-        if args.nearest:
-            subset = find_layers(layer)
-            for name in subset:
-                quantizer = Quantizer()
-                quantizer.configure(
-                    args.wbits, perchannel=True, sym=args.sym, mse=False
-                )
-                W = subset[name].weight.data
-                quantizer.find_params(W, weight=True)
-                subset[name].weight.data = quantize(
-                    W, quantizer.scale, quantizer.zero, quantizer.maxq
-                ).to(next(iter(layer.parameters())).dtype)
-
+        # 量化（含 RTN 基线）已在 bloom_sequential 中完成，这里只做前向
         for j in range(nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, alibi=alibi)[0]
         layers[i] = layer.cpu() 
@@ -273,9 +244,17 @@ if __name__ == '__main__':
         '--new-eval', action='store_true',
         help='Whether to use the new PTB and C4 eval'
     )
+    add_method_args(parser)
 
 
     args = parser.parse_args()
+    try:
+        # --nearest / --quant_method 归一化：rtn / gptq / awq / awq_gptq
+        args.quant_method = resolve_method(args)
+        # 尽早检查 --save（3-bit 打包）与所选方法/分组是否兼容，避免量化跑完才报错
+        check_save_supported(args, args.quant_method)
+    except NotImplementedError as err:
+        parser.error(str(err))
 
     model = get_bloom(args.model)
     model.eval()
@@ -284,7 +263,7 @@ if __name__ == '__main__':
         args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
     )
 
-    if args.wbits < 16 and not args.nearest:
+    if args.wbits < 16:
         tick = time.time()
         quantizers = bloom_sequential(model, dataloader, DEV)
         print(time.time() - tick)

@@ -26,11 +26,11 @@ class Quantizer(nn.Module):
         self.maxq = torch.tensor(2 ** bits - 1)
         self.perchannel = perchannel
         self.sym = sym
-        self.mse = mse
+        self.mse = mse # 是否用均方误差来搜索最优scale
         self.norm = norm
         self.grid = grid
         self.maxshrink = maxshrink 
-        if trits:
+        if trits: # 三值量化
             self.maxq = torch.tensor(-1) 
 
     def find_params(self, x, weight=False):
