@@ -1,4 +1,5 @@
 """Helpers for loading models and datasets from ModelScope."""
+import os
 from pathlib import Path
 
 
@@ -21,6 +22,73 @@ def modelscope_model_path(model):
     from modelscope import snapshot_download
 
     return snapshot_download(model)
+
+
+def _modelscope_dataset_cache_roots(cache_dir):
+    """Return plausible ModelScope dataset-cache roots, most specific first."""
+    import os
+
+    paths = []
+    env_roots = [
+        cache_dir,
+        os.environ.get("MODELSCOPE_CACHE"),
+        os.environ.get("MODELSCOPE_CACHE_HOME"),
+    ]
+    try:
+        env_roots.append(Path.home() / ".cache" / "modelscope")
+    except RuntimeError:
+        # Path.home() can fail in unusual container environments.
+        pass
+
+    for path in env_roots:
+        if not path:
+            continue
+        root = Path(path).expanduser()
+        # Depending on the ModelScope version, an explicit cache_dir is either
+        # treated as the cache root or as the parent containing hub/datasets.
+        paths.extend((root, root / "hub"))
+    return paths
+
+
+def _find_modelscope_dataset_snapshot(dataset_id, relative_files, cache_dir=None):
+    """Find a complete local ModelScope dataset snapshot without network I/O."""
+    dataset_path = Path(dataset_id)
+    searched_dataset_roots = []
+
+    for cache_root in _modelscope_dataset_cache_roots(cache_dir):
+        # Common ModelScope layouts:
+        #   <cache>/hub/datasets/<owner>/<dataset>/<revision>/<file>
+        #   <cache>/datasets/<owner>/<dataset>/<revision>/<file>
+        #   <cache>/<owner>/<dataset>/<revision>/<file>
+        roots = [
+            cache_root / "datasets" / dataset_path,
+            cache_root / dataset_path,
+        ]
+        # Handle an explicit cache_dir that already points at the dataset root.
+        if cache_root.name == dataset_path.name:
+            roots.append(cache_root)
+        for dataset_root in roots:
+            if dataset_root in searched_dataset_roots:
+                continue
+            searched_dataset_roots.append(dataset_root)
+            for relative_file in relative_files:
+                relative = Path(relative_file)
+                candidates = list(dataset_root.glob(str(relative)))
+                candidates.extend(dataset_root.glob(f"*/{relative}"))
+                candidates.extend(dataset_root.glob(f"**/{relative}"))
+                for candidate in candidates:
+                    if not candidate.is_file() or candidate.stat().st_size == 0:
+                        continue
+                    snapshot_root = candidate
+                    for _ in relative.parts:
+                        snapshot_root = snapshot_root.parent
+                    if all(
+                        (snapshot_root / needed).is_file()
+                        and (snapshot_root / needed).stat().st_size > 0
+                        for needed in relative_files
+                    ):
+                        return snapshot_root
+    return None
 
 
 def load_modelscope_dataset(
@@ -48,11 +116,17 @@ def load_modelscope_dataset(
             for split, files in data_files.items()
         }
         patterns = sorted({file for files in relative_files.values() for file in files})
-        root = Path(dataset_snapshot_download(
-            dataset_id,
-            cache_dir=cache_dir,
-            allow_patterns=patterns,
-        ))
+        root = None
+        if os.environ.get("GPTQ_FORCE_DATASET_DOWNLOAD", "0") != "1":
+            root = _find_modelscope_dataset_snapshot(dataset_id, patterns, cache_dir)
+        if root is not None:
+            print(f"Using cached ModelScope dataset snapshot: {root}")
+        else:
+            root = Path(dataset_snapshot_download(
+                dataset_id,
+                cache_dir=cache_dir,
+                allow_patterns=patterns,
+            ))
         local_files = {
             split: [str(root / file) for file in files]
             for split, files in relative_files.items()
