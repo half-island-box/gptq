@@ -35,6 +35,30 @@ def load_modelscope_dataset(
     """Load a ModelScope dataset using the project's Hugging Face names."""
     dataset_id = _DATASET_IDS.get(path, path)
 
+    if path == "allenai/c4" and data_files:
+        # ModelScope 1.18's dataset loader ignores the single-shard data_files
+        # selection and tries to prepare the complete 365M-example C4 corpus.
+        # Download only the requested shards, then build a local JSON dataset.
+        from datasets import load_dataset
+        from modelscope.hub.snapshot_download import dataset_snapshot_download
+
+        relative_files = {
+            split: [file if isinstance(file, str) else file[0] for file in files]
+            if isinstance(files, (list, tuple)) else [files]
+            for split, files in data_files.items()
+        }
+        patterns = sorted({file for files in relative_files.values() for file in files})
+        root = Path(dataset_snapshot_download(
+            dataset_id,
+            cache_dir=cache_dir,
+            allow_patterns=patterns,
+        ))
+        local_files = {
+            split: [str(root / file) for file in files]
+            for split, files in relative_files.items()
+        }
+        return load_dataset("json", data_files=local_files, split=split)
+
     if path == "ptb_text_only":
         # ModelScope's PTB mirror is a datasets.save_to_disk() export. MsDataset
         # 1.18 mistakes its state.json files for source records, so read the
