@@ -25,6 +25,21 @@ def get_llama(model):
     model.seqlen = 2048
     return model
 
+_LLAMA_LAYER_KWARGS = ("attention_mask", "position_ids", "position_embeddings")
+
+
+def _capture_llama_layer_kwargs(cache, kwargs):
+    """Capture kwargs needed by both old and new Transformers Llama layers."""
+    for name in _LLAMA_LAYER_KWARGS:
+        if name in kwargs:
+            cache[name] = kwargs[name]
+
+
+def _get_llama_layer_kwargs(cache):
+    """Return captured kwargs that exist in the installed Transformers version."""
+    return {name: cache[name] for name in _LLAMA_LAYER_KWARGS if name in cache}
+
+
 @torch.no_grad()
 def llama_sequential(model, dataloader, dev):
     print('Starting ...')
@@ -50,8 +65,7 @@ def llama_sequential(model, dataloader, dev):
         def forward(self, inp, **kwargs):
             inps[cache['i']] = inp
             cache['i'] += 1
-            cache['attention_mask'] = kwargs['attention_mask']
-            cache['position_ids'] = kwargs['position_ids']
+            _capture_llama_layer_kwargs(cache, kwargs)
             raise ValueError
     layers[0] = Catcher(layers[0])
     for batch in dataloader:
@@ -67,8 +81,7 @@ def llama_sequential(model, dataloader, dev):
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
-    attention_mask = cache['attention_mask']
-    position_ids = cache['position_ids']
+    layer_kwargs = _get_llama_layer_kwargs(cache)
 
     print('Ready.')
 
@@ -89,17 +102,13 @@ def llama_sequential(model, dataloader, dev):
             sequential = None
 
         def fwd(x, layer=layer):
-            return layer(
-                x, attention_mask=attention_mask, position_ids=position_ids
-            )[0]
+            return layer(x, **layer_kwargs)[0]
 
         # 统一驱动：标定(可选) -> AWQ 等价变换(可选) -> 量化 -> 重算该层输出
         layer_quantizers = quantize_block(
             layer, inps, outs, fwd, args.quant_method, args,
             layer_idx=i,
-            layer_kwargs={
-                'attention_mask': attention_mask, 'position_ids': position_ids
-            },
+            layer_kwargs=layer_kwargs,
             subsets=sequential,
         )
         for name, quantizer in layer_quantizers.items():
@@ -142,8 +151,7 @@ def llama_eval(model, testenc, dev):
         def forward(self, inp, **kwargs):
             inps[cache['i']] = inp
             cache['i'] += 1
-            cache['attention_mask'] = kwargs['attention_mask']
-            cache['position_ids'] = kwargs['position_ids']
+            _capture_llama_layer_kwargs(cache, kwargs)
             raise ValueError
     layers[0] = Catcher(layers[0])
     for i in range(nsamples):
@@ -159,8 +167,7 @@ def llama_eval(model, testenc, dev):
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
-    attention_mask = cache['attention_mask']
-    position_ids = cache['position_ids']
+    layer_kwargs = _get_llama_layer_kwargs(cache)
 
     for i in range(len(layers)):
         print(i)
@@ -168,7 +175,7 @@ def llama_eval(model, testenc, dev):
         
         # 量化（含 RTN 基线）已在 llama_sequential 中完成，这里只做前向
         for j in range(nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            outs[j] = layer(inps[j].unsqueeze(0), **layer_kwargs)[0]
         layers[i] = layer.cpu()
         del layer
         torch.cuda.empty_cache()
