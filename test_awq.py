@@ -175,6 +175,33 @@ def test_scaling_is_equivalent():
 
 
 # --------------------------------------------------------------------------------------
+# 2b. 显式整数量化与 4-bit packed 推理
+@torch.no_grad()
+def test_quant4_pack_matches_fake_quant():
+    from quant import Quant4Linear
+
+    W = torch.randn(11, HIDDEN)
+    state = awq.quantize_weight(W, wbits=4, groupsize=GROUP, sym=False)
+    assert state.q.min() >= 0 and state.q.max() <= 15
+    assert state.scales.shape == (11, HIDDEN // GROUP)
+
+    linear = torch.nn.Linear(HIDDEN, 11)
+    linear.weight.data = state.dequantize()
+    packed = Quant4Linear(HIDDEN, 11, groupsize=GROUP)
+    packed.pack(linear, state)
+    assert packed.qweight.shape == (11, HIDDEN // 2)
+
+    x = torch.randn(2, 5, HIDDEN)
+    ref = torch.nn.functional.linear(x, linear.weight, linear.bias)
+    out = packed(x)
+    assert torch.allclose(out, ref, atol=1e-6)
+
+    reloaded = Quant4Linear(HIDDEN, 11, groupsize=GROUP)
+    reloaded.load_state_dict(packed.state_dict())
+    assert torch.equal(reloaded(x), out)
+    print('  [ok] AWQ INT4 packed CPU forward and state_dict round-trip match')
+
+
 # 3. AWQ 优于纯 RTN
 # --------------------------------------------------------------------------------------
 def test_awq_beats_rtn():
@@ -289,6 +316,7 @@ if __name__ == '__main__':
     tests = [
         test_group_quantize_matches_quantizer,
         test_scaling_is_equivalent,
+        test_quant4_pack_matches_fake_quant,
         test_awq_beats_rtn,
         test_all_methods_run,
         test_pack3_compatible,

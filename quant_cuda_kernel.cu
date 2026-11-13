@@ -242,3 +242,79 @@ __global__ void VecQuant3MatMulKernelFaster(
 
   atomicAdd(&mul[col], res);
 }
+
+__global__ void VecQuant4MatMulKernel(
+    const float* __restrict__ vec,
+    const unsigned char* __restrict__ mat,
+    float* __restrict__ mul,
+    const float* __restrict__ scales,
+    const float* __restrict__ zeros,
+    int batch,
+    int height,
+    int width,
+    int packed_width,
+    int groupsize
+);
+
+void vecquant4matmul_cuda(
+  torch::Tensor vec,
+  torch::Tensor mat,
+  torch::Tensor mul,
+  torch::Tensor scales,
+  torch::Tensor zeros,
+  int64_t groupsize
+) {
+  const int batch = vec.size(0);
+  const int height = mat.size(0);       // out_features
+  const int width = vec.size(1);        // in_features
+  const int packed_width = mat.size(1); // in_features / 2
+
+  TORCH_CHECK(vec.device().is_cuda(), "vec must be CUDA");
+  TORCH_CHECK(mat.device().is_cuda(), "mat must be CUDA");
+  TORCH_CHECK(mul.device().is_cuda(), "mul must be CUDA");
+  TORCH_CHECK(vec.scalar_type() == at::kFloat, "vec must be float32");
+  TORCH_CHECK(mat.scalar_type() == at::kUInt8, "mat must be uint8");
+  TORCH_CHECK(mul.scalar_type() == at::kFloat, "mul must be float32");
+  TORCH_CHECK(scales.scalar_type() == at::kFloat, "scales must be float32");
+  TORCH_CHECK(zeros.scalar_type() == at::kFloat, "zeros must be float32");
+  TORCH_CHECK(width == 2 * packed_width, "mat must contain two 4-bit values per byte");
+  TORCH_CHECK(width % groupsize == 0, "groupsize must divide in_features");
+
+  dim3 blocks((height + 15) / 16, (batch + 15) / 16);
+  dim3 threads(16, 16);
+  VecQuant4MatMulKernel<<<blocks, threads>>>(
+    vec.data_ptr<float>(), mat.data_ptr<unsigned char>(), mul.data_ptr<float>(),
+    scales.data_ptr<float>(), zeros.data_ptr<float>(),
+    batch, height, width, packed_width, static_cast<int>(groupsize)
+  );
+}
+
+__global__ void VecQuant4MatMulKernel(
+    const float* __restrict__ vec,
+    const unsigned char* __restrict__ mat,
+    float* __restrict__ mul,
+    const float* __restrict__ scales,
+    const float* __restrict__ zeros,
+    int batch,
+    int height,
+    int width,
+    int packed_width,
+    int groupsize
+) {
+  int out = blockIdx.x * blockDim.x + threadIdx.x;
+  int row = blockIdx.y * blockDim.y + threadIdx.y;
+  if (out >= height || row >= batch) return;
+
+  int ngroups = width / groupsize;
+  const float* rowvec = vec + row * width;
+  float res = 0.0f;
+  for (int k = 0; k < width; ++k) {
+    unsigned char packed = mat[out * packed_width + (k >> 1)];
+    int q = (k & 1) == 0 ? (packed & 0xF) : (packed >> 4);
+    int group = k / groupsize;
+    float scale = scales[out * ngroups + group];
+    float zero = zeros[out * ngroups + group];
+    res += (scale * static_cast<float>(q) - zero) * rowvec[k];
+  }
+  mul[row * height + out] += res;
+}

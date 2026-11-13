@@ -31,6 +31,7 @@ https://arxiv.org/abs/2306.00978    参考实现: https://github.com/mit-han-lab
 
 import inspect as _inspect
 from collections import namedtuple
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -42,6 +43,8 @@ __all__ = [
     'ScaleGroup',
     'find_scale_groups',
     'group_quantize',
+    'AWQQuantState',
+    'quantize_weight',
     'get_act_scale',
     'search_scales',
     'apply_scales',
@@ -135,33 +138,76 @@ class ScaledActivation(nn.Module):
 
 
 # --------------------------------------------------------------------------------------
-# 量化语义：唯一的一份（RTN / AWQ 复用，与 GPTQ 内部的 Quantizer 完全一致）
+# 量化语义：显式整数 q + 反量化；保留旧 group_quantize 接口
 # --------------------------------------------------------------------------------------
+@dataclass
+class AWQQuantState:
+    """An explicit affine integer-quantization result for a weight tensor."""
+
+    q: torch.Tensor
+    scales: torch.Tensor
+    zeros: torch.Tensor
+    maxq: int
+    group_size: int
+    original_shape: torch.Size
+    original_dtype: torch.dtype
+    symmetric: bool = False
+    bits: int = 4
+
+    def dequantize(self, dtype=None):
+        n_group = self.scales.shape[1]
+        w2 = self.q.reshape(-1, n_group, self.group_size)
+        scales = self.scales[:, :, None]
+        zeros = self.zeros[:, :, None]
+        w = scales * (w2.to(scales.dtype) - zeros)
+        return w.reshape(self.original_shape).to(
+            self.original_dtype if dtype is None else dtype
+        )
+
+    def cpu(self):
+        return AWQQuantState(
+            q=self.q.cpu(), scales=self.scales.cpu(), zeros=self.zeros.cpu(),
+            maxq=self.maxq, group_size=self.group_size,
+            original_shape=self.original_shape, original_dtype=self.original_dtype,
+            symmetric=self.symmetric, bits=self.bits,
+        )
+
+    def to_legacy(self):
+        """Return the historical group_quantize layout: (Wq, [n_group, out], ...)."""
+        return (
+            self.dequantize(),
+            self.scales.t().contiguous(),
+            self.zeros.t().contiguous(),
+        )
+
+    @property
+    def scale(self):
+        if self.scales.shape[1] != 1:
+            raise NotImplementedError('pack3 requires per-row quantization')
+        return self.scales[:, 0].reshape(-1, 1)
+
+    @property
+    def zero(self):
+        if self.zeros.shape[1] != 1:
+            raise NotImplementedError('pack3 requires per-row quantization')
+        return self.zeros[:, 0].reshape(-1, 1)
+
+
 @torch.no_grad()
-def group_quantize(w, wbits, groupsize=-1, sym=False, mse=False):
-    """分组 affine 量化 -> 反量化后的浮点权重。
-
-    参数
-    ----
-    w          : [co, ci] 权重（也接受任意形状，按 last dim 为 in_features 处理）
-    groupsize  : <=0 表示整行一个 group（per-output-channel），否则按最后一维切分
-    sym        : 是否对称量化（对应 `--sym`）
-
-    返回
-    ----
-    (q, scales, zeros)：q 与 w 形状相同（已反量化），scales/zeros 形状 [n_group, co]
-    """
+def quantize_weight(w, wbits, groupsize=-1, sym=False, mse=False):
+    """Quantize a weight to integers plus per-output/per-group affine parameters."""
     org_shape = w.shape
     w2 = w.reshape(-1, org_shape[-1])
-    co, ci = w2.shape
-    gs = ci if groupsize in (None, -1, 0) else int(groupsize)
-    if gs <= 0 or ci % gs != 0:
-        raise ValueError(f'groupsize={groupsize} 无法整除 in_features={ci}')
+    out_features, in_features = w2.shape
+    gs = in_features if groupsize in (None, -1, 0) else int(groupsize)
+    if gs <= 0 or in_features % gs != 0:
+        raise ValueError(f'groupsize={groupsize} cannot divide in_features={in_features}')
 
-    n_group = ci // gs
-    q2 = torch.zeros_like(w2)
-    scales = torch.zeros(n_group, co, dtype=w2.dtype, device=w2.device)
-    zeros = torch.zeros(n_group, co, dtype=w2.dtype, device=w2.device)
+    n_group = in_features // gs
+    maxq = 2 ** int(wbits) - 1
+    q = torch.empty(w2.shape, dtype=torch.uint8, device=w2.device)
+    scales = torch.empty((out_features, n_group), dtype=w2.dtype, device=w2.device)
+    zeros = torch.empty_like(scales)
 
     for g in range(n_group):
         sl = slice(g * gs, (g + 1) * gs)
@@ -169,20 +215,34 @@ def group_quantize(w, wbits, groupsize=-1, sym=False, mse=False):
         quantizer = Quantizer()
         quantizer.configure(wbits, perchannel=True, sym=sym, mse=mse)
         quantizer.find_params(chunk, weight=True)
-        q2[:, sl] = quantize(chunk, quantizer.scale, quantizer.zero, quantizer.maxq)
-        scales[g] = quantizer.scale.reshape(-1)
-        zeros[g] = quantizer.zero.reshape(-1)
+        scale = quantizer.scale.reshape(-1)
+        zero = quantizer.zero.reshape(-1)
+        q[:, sl] = (torch.round(chunk / scale[:, None]) + zero[:, None]).clamp_(
+            0, maxq
+        ).to(torch.uint8)
+        scales[:, g] = scale
+        zeros[:, g] = zero
 
-    return q2.reshape(org_shape), scales, zeros
+    return AWQQuantState(
+        q=q.reshape(org_shape), scales=scales, zeros=zeros, maxq=maxq,
+        group_size=gs, original_shape=org_shape, original_dtype=w.dtype,
+        symmetric=sym, bits=int(wbits),
+    )
 
 
+@torch.no_grad()
+def group_quantize(w, wbits, groupsize=-1, sym=False, mse=False):
+    """Group affine quantize -> dequantized weight, preserving the old API."""
+    return quantize_weight(w, wbits, groupsize, sym, mse).to_legacy()
+
+
+# --------------------------------------------------------------------------------------
 @torch.no_grad()
 def get_act_scale(x):
     """per-input-channel 的激活幅度（沿 token 维取 mean(|x|)）。"""
     return x.detach().abs().reshape(-1, x.shape[-1]).float().mean(dim=0).cpu()
 
 
-# --------------------------------------------------------------------------------------
 # 等价缩放的折叠（把 s 分配进前一个算子）
 # --------------------------------------------------------------------------------------
 @torch.no_grad()
@@ -426,7 +486,7 @@ def _search_module_scale(block, linears, x, inspect_mod, wbits, groupsize, sym,
 
         for fc in linears:
             fc.weight.mul_(scales.view(1, -1))
-            q, _, _ = group_quantize(fc.weight.data, wbits, groupsize, sym, mse)
+            q = quantize_weight(fc.weight.data, wbits, groupsize, sym, mse).dequantize()
             fc.weight.data = (q / scales.view(1, -1)).to(dtype)
 
         out = _call_with_kwargs(inspect_mod, x, kwargs)
@@ -520,8 +580,7 @@ def _quant_dequant_groups(w2d, wbits, sym):
     """对 [rows, groupsize] 做分组量化并反量化（量化语义与 group_quantize 完全一致）。"""
     quantizer = Quantizer()
     quantizer.configure(wbits, perchannel=True, sym=sym, mse=False)
-    quantizer.find_params(w2d, weight=True)
-    return quantize(w2d, quantizer.scale, quantizer.zero, quantizer.maxq)
+    return quantize_weight(w2d, wbits, w2d.shape[-1], sym).dequantize()
 
 
 @torch.no_grad()

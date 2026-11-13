@@ -130,8 +130,11 @@ class Quantizer(nn.Module):
 
 try:
     import quant_cuda
-except:
-    print('CUDA extension not installed.')
+    _HAS_QUANT_CUDA = True
+except ImportError:
+    quant_cuda = None
+    _HAS_QUANT_CUDA = False
+    print('CUDA extension not installed; Quant4Linear CPU fallback will be used.')
 
 # Assumes layer is perfectly divisible into 1024 * 1024 blocks
 class Quant3Linear(nn.Module): 
@@ -211,3 +214,111 @@ def make_quant3(module, names, name='', faster=False):
             )
     for name1, child in module.named_children():
         make_quant3(child, names, name + '.' + name1 if name != '' else name1, faster=faster)
+
+# Packed 4-bit format: each uint8 holds two little-endian nibbles along in_features.
+# qweight: [out_features, in_features / 2], scales/zeros: [out_features, n_groups].
+class Quant4Linear(nn.Module):
+    def __init__(self, infeatures, outfeatures, groupsize=-1):
+        super().__init__()
+        if infeatures % 2:
+            raise ValueError('Quant4Linear requires an even in_features')
+        if groupsize in (None, -1, 0):
+            groupsize = infeatures
+        if groupsize <= 0 or infeatures % groupsize:
+            raise ValueError('Quant4Linear groupsize must divide in_features')
+
+        self.infeatures = infeatures
+        self.outfeatures = outfeatures
+        self.groupsize = int(groupsize)
+        self.register_buffer('quant_format', torch.tensor(4, dtype=torch.uint8))
+        self.register_buffer(
+            'qweight', torch.zeros((outfeatures, infeatures // 2), dtype=torch.uint8)
+        )
+        self.register_buffer(
+            'scales',
+            torch.zeros((outfeatures, infeatures // self.groupsize)),
+        )
+        self.register_buffer(
+            'zeros', torch.zeros((outfeatures, infeatures // self.groupsize))
+        )
+        self.register_buffer('bias', torch.zeros(outfeatures))
+
+    @torch.no_grad()
+    def pack(self, linear, state):
+        if state.bits != 4:
+            raise ValueError(f'Quant4Linear expects 4-bit state, got {state.bits}')
+        if tuple(linear.weight.shape) != tuple(state.original_shape):
+            raise ValueError('linear/state shape mismatch')
+        if linear.in_features != self.infeatures or linear.out_features != self.outfeatures:
+            raise ValueError('linear/module feature dimensions mismatch')
+        if state.group_size != self.groupsize:
+            raise ValueError('state/module groupsize mismatch')
+
+        self.scales = state.scales.detach().clone()
+        self.zeros = state.zeros.detach().clone()
+        if linear.bias is not None:
+            self.bias = linear.bias.detach().clone()
+
+        q = state.q.detach().to(torch.uint8).cpu()
+        q = q.reshape(self.outfeatures, self.infeatures)
+        self.qweight = (q[:, 0::2] | (q[:, 1::2] << 4)).contiguous()
+
+    def _dequantized_weight(self, dtype=None):
+        q = torch.empty(
+            (self.outfeatures, self.infeatures),
+            dtype=torch.uint8,
+            device=self.qweight.device,
+        )
+        q[:, 0::2] = self.qweight & 0xF
+        q[:, 1::2] = self.qweight >> 4
+        scales = self.scales[:, :, None]
+        zeros = self.zeros[:, :, None]
+        w = scales * (q.reshape(
+            self.outfeatures, -1, self.groupsize
+        ).to(scales.dtype) - zeros)
+        dtype = self.scales.dtype if dtype is None else dtype
+        return w.reshape(self.outfeatures, self.infeatures).to(dtype)
+
+    def forward(self, x):
+        if x.shape[-1] != self.infeatures:
+            raise ValueError(f'expected ... x {self.infeatures}, got {x.shape[-1]}')
+        outshape = list(x.shape)
+        outshape[-1] = self.outfeatures
+        dtype = x.dtype
+        x2 = x.reshape(-1, self.infeatures)
+
+        if x2.is_cuda:
+            if not _HAS_QUANT_CUDA or not hasattr(quant_cuda, 'vecquant4matmul'):
+                raise RuntimeError(
+                    'AWQ 4-bit CUDA inference requires rebuilding quant_cuda with vecquant4matmul'
+                )
+            xf = x2.float().contiguous()
+            y = self.bias.float().expand(x2.shape[0], self.outfeatures).clone()
+            scales = self.scales.float().contiguous()
+            zeros = self.zeros.float().contiguous()
+            quant_cuda.vecquant4matmul(
+                xf, self.qweight.contiguous(), y, scales, zeros, self.groupsize
+            )
+            return y.to(dtype).reshape(outshape)
+
+        # Correctness/reference path for CPU-only machines. It unpacks only while
+        # computing and does not replace the model's packed qweight with a float copy.
+        y = torch.nn.functional.linear(x2, self._dequantized_weight(dtype), self.bias.to(dtype))
+        return y.reshape(outshape)
+
+
+def make_quant4(module, names, name='', groupsize=-1):
+    if isinstance(module, Quant4Linear):
+        return
+    for attr in dir(module):
+        tmp = getattr(module, attr)
+        name1 = name + '.' + attr if name != '' else attr
+        if name1 in names:
+            setattr(
+                module, attr,
+                Quant4Linear(tmp.in_features, tmp.out_features, groupsize=groupsize),
+            )
+    for name1, child in module.named_children():
+        make_quant4(
+            child, names, name + '.' + name1 if name != '' else name1, groupsize=groupsize
+        )

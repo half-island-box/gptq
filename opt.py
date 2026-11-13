@@ -10,7 +10,7 @@ from gptq import *
 from modelutils import *
 from modelscope_utils import modelscope_model_path
 from quant import *
-from quant_methods import add_method_args, check_save_supported, quantize_block, resolve_method
+from quant_methods import add_method_args, check_save_supported, pack_model, quantize_block, resolve_method
 
 
 def get_opt(model):
@@ -241,18 +241,60 @@ def append_ppl_result(args, dataset, ppl):
     print(f'Saved result to {args.results_csv}')
 
 
+def _checkpoint_is_awq4(checkpoint):
+    state = torch.load(checkpoint, map_location='cpu')
+    return any(
+        name.endswith('.quant_format') and int(value.item()) == 4
+        for name, value in state.items()
+    ), state
+
+
+def load_awq4(config, checkpoint, state):
+    from transformers import OPTForCausalLM
+
+    torch.set_default_dtype(torch.half)
+    model = OPTForCausalLM(config)
+    torch.set_default_dtype(torch.float)
+    model = model.eval()
+
+    layers = find_layers(model)
+    for name in ['model.decoder.project_out', 'model.decoder.project_in', 'lm_head']:
+        if name in layers:
+            del layers[name]
+
+    groupsize = None
+    for name in layers:
+        state_name = f'{name}.scales'
+        if state_name in state and name in layers:
+            ngroups = state[state_name].shape[-1]
+            groupsize = layers[name].in_features // ngroups
+            break
+    if groupsize is None or groupsize <= 0:
+        raise RuntimeError('AWQ4 checkpoint does not contain usable grouped scales')
+
+    make_quant4(model, layers, groupsize=groupsize)
+    print(f'Loading AWQ INT4 model (groupsize={groupsize}) ...')
+    model.load_state_dict(state)
+    model.seqlen = model.config.max_position_embeddings
+    print('Done.')
+    return model
+
+
 def load_quant3(model, checkpoint):
-    from transformers import OPTConfig, OPTForCausalLM 
+    from transformers import OPTConfig, OPTForCausalLM
     config = OPTConfig.from_pretrained(modelscope_model_path(model))
+    awq4, state = _checkpoint_is_awq4(checkpoint)
+    if awq4:
+        return load_awq4(config, checkpoint, state)
+
     def noop(*args, **kwargs):
         pass
-    torch.nn.init.kaiming_uniform_ = noop 
-    torch.nn.init.uniform_ = noop 
-    torch.nn.init.normal_ = noop 
+    torch.nn.init.kaiming_uniform_ = noop
+    torch.nn.init.uniform_ = noop
+    torch.nn.init.normal_ = noop
 
     torch.set_default_dtype(torch.half)
     transformers.modeling_utils._init_weights = False
-    torch.set_default_dtype(torch.half)
     model = OPTForCausalLM(config)
     torch.set_default_dtype(torch.float)
     model = model.eval()
@@ -263,10 +305,9 @@ def load_quant3(model, checkpoint):
     make_quant3(model, layers, faster=args.faster_kernel)
 
     print('Loading model ...')
-    model.load_state_dict(torch.load(checkpoint))
+    model.load_state_dict(state)
     model.seqlen = model.config.max_position_embeddings
     print('Done.')
-
     return model
 
 def opt_multigpu(model, gpus):
@@ -486,5 +527,5 @@ if __name__ == '__main__':
         append_ppl_result(args, dataset, ppl)
 
     if args.save:
-        opt_pack3(model, quantizers)
+        pack_model(model, quantizers, args)
         torch.save(model.state_dict(), args.save) 

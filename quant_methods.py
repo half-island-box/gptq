@@ -19,14 +19,13 @@ import gc
 
 import torch
 
-from awq import apply_awq, group_quantize
+from awq import AWQQuantState, apply_awq, quantize_weight
 from gptq import GPTQ
-from modelutils import find_layers
 from quant import Quantizer
-
+from modelutils import find_layers
 __all__ = [
     'METHODS', 'add_method_args', 'resolve_method', 'quantize_block',
-    'check_save_supported', 'collect_input_features',
+    'check_save_supported', 'collect_input_features', 'pack_model',
 ]
 
 METHODS = ('rtn', 'gptq', 'awq', 'awq_gptq')
@@ -75,13 +74,17 @@ def resolve_method(args):
 
 
 def check_save_supported(args, method):
-    """`--save`（3-bit 打包）目前只支持逐行量化，给出明确报错而不是静默出错。"""
+    """Validate the checkpoint format selected by --save."""
     if not getattr(args, 'save', ''):
         return
-    if args.groupsize not in (-1, 0) and method in ('rtn', 'awq', 'awq_gptq'):
+    if method == 'awq' and args.wbits == 4:
+        if args.groupsize in (None, -1, 0):
+            args.groupsize = -1  # resolved later by Quant4Linear
+        return
+    if args.wbits != 3 or args.groupsize not in (-1, 0):
         raise NotImplementedError(
-            f'`--save` (3-bit packing) does not support --groupsize {args.groupsize} '
-            f'with --quant_method {method}; use --groupsize -1.'
+            '--save supports AWQ 4-bit grouped checkpoints, or the legacy '
+            '3-bit per-row format (--wbits 3 --groupsize -1).'
         )
 
 
@@ -153,18 +156,9 @@ def _build_gptq(linears, names, inps, fwd, args):
 def _rtn_quantize(module, args):
     """就地做分组 RTN 量化，返回一个填好 scale/zero 的 `Quantizer`（供 --save 使用）。"""
     W = module.weight.data
-    Wq, scales, zeros = group_quantize(W, args.wbits, args.groupsize, args.sym)
-    module.weight.data = Wq.to(W.dtype)
-
-    quantizer = Quantizer()
-    quantizer.configure(args.wbits, perchannel=True, sym=args.sym, mse=False)
-    if scales.shape[0] == 1:  # 逐行量化：与 Quantizer.find_params(weight=True) 的布局一致
-        quantizer.scale = scales.reshape(-1, 1)
-        quantizer.zero = zeros.reshape(-1, 1)
-    else:  # 分组量化：pack 不支持，仅保留最后一组以免 scale 形状错乱
-        quantizer.scale = scales[-1:].reshape(-1, 1)
-        quantizer.zero = zeros[-1:].reshape(-1, 1)
-    return quantizer
+    state = quantize_weight(W, args.wbits, args.groupsize, args.sym)
+    module.weight.data = state.dequantize(dtype=W.dtype)
+    return state
 
 
 # --------------------------------------------------------------------------------------
@@ -254,3 +248,39 @@ def quantize_block(layer, inps, outs, fwd, method, args,
         outs[j] = fwd(inps[j].unsqueeze(0))
 
     return quantizers
+
+@torch.no_grad()
+def pack_model(model, quantizers, args):
+    """Replace quantized Linears with the appropriate packed inference layer."""
+    from awq import AWQQuantState
+    from modelutils import find_layers
+    from quant import Quant3Linear, Quant4Linear, make_quant3, make_quant4
+
+    layers = find_layers(model)
+    layers = {name: layers[name] for name in quantizers}
+    awq_states = {
+        name: value.cpu() if isinstance(value, AWQQuantState) else value
+        for name, value in quantizers.items()
+    }
+    use_awq4 = any(
+        isinstance(value, AWQQuantState) and value.bits == 4
+        for value in awq_states.values()
+    )
+    if use_awq4:
+        groupsize = args.groupsize
+        make_quant4(model, quantizers, groupsize=groupsize)
+        qlayers = find_layers(model, [Quant4Linear])
+        print('Packing AWQ INT4 ...')
+        for name, module in qlayers.items():
+            print(name)
+            module.pack(layers[name], awq_states[name])
+    else:
+        make_quant3(model, quantizers, faster=getattr(args, 'faster_kernel', False))
+        qlayers = find_layers(model, [Quant3Linear])
+        print('Packing INT3 ...')
+        for name, module in qlayers.items():
+            print(name)
+            quantizer = awq_states[name]
+            module.pack(layers[name], quantizer.scale, quantizer.zero)
+    print('Done.')
+    return model

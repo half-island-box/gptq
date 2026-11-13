@@ -9,7 +9,7 @@ from gptq import *
 from modelutils import *
 from modelscope_utils import modelscope_model_path
 from quant import *
-from quant_methods import add_method_args, check_save_supported, quantize_block, resolve_method
+from quant_methods import add_method_args, check_save_supported, pack_model, quantize_block, resolve_method
 
 
 def get_bloom(model):
@@ -279,5 +279,5 @@ if __name__ == '__main__':
         bloom_eval(model, testloader, DEV)
 
     if args.save:
-        bloom_pack3(model, quantizers)
+        pack_model(model, quantizers, args)
         torch.save(model.state_dict(), args.save)

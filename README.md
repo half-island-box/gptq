@@ -77,7 +77,12 @@ Notes:
   clipping search.
 * `--true-sequential`, `--act-order` and `--static-groups` only affect the GPTQ step:
   they are ignored by `rtn`/`awq` and honoured by `gptq`/`awq_gptq`.
-* `--save` (3-bit packing) currently requires `--groupsize -1`.
+* `--save` now produces a true AWQ INT4 packed checkpoint for
+  `--quant_method awq --wbits 4`. `qweight` stores two 4-bit values per byte and
+  `scales`/`zeros` retain one entry per output channel per input group. CUDA
+  inference unpacks/dequantizes inside `vecquant4matmul`; a CPU reference path is
+  available for tests. The legacy 3-bit format still requires
+  `--wbits 3 --groupsize -1`.
 * The scripts under `zeroShot/` keep their own copies of the OPT/BLOOM drivers and only
   support the RTN (`--nearest`) and GPTQ paths.
 
