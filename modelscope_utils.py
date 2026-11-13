@@ -3,19 +3,39 @@ import os
 from pathlib import Path
 
 
-# Try these ModelScope mirrors when the short experiment alias is requested.
+# Cache IDs include historical mirrors whose remote repositories were removed.
+# Download IDs only contain repositories that are currently reachable.
 _MODEL_ALIASES = {
-    "llama-7b": (
-        # Verified ModelScope mirrors; shakechen avoids downloading duplicate
-        # pickle weights by requesting only its safetensors files below.
-        "shakechen/Llama-2-7b-hf",
-        "vllm-ascend/Llama-2-7b-hf",
-        # Keep older cache IDs discoverable even though their remote mirrors 404.
-        "LLM-Research/llama-2-7b-hf",
-        "AI-ModelScope/llama-2-7b-hf",
-    )
+    "llama-7b": {
+        "cache": (
+            "shakechen/Llama-2-7b-hf",
+            "vllm-ascend/Llama-2-7b-hf",
+            "LLM-Research/llama-2-7b-hf",
+            "AI-ModelScope/llama-2-7b-hf",
+        ),
+        "download": (
+            "shakechen/Llama-2-7b-hf",
+            "vllm-ascend/Llama-2-7b-hf",
+        ),
+    }
 }
 
+# Match exact files only. In particular, do not use "*.json": these mirrors
+# contain an empty ModelScope-only "configuration.json" that crashes 1.18's
+# downloader, while Transformers only needs "config.json".
+_LLAMA_DOWNLOAD_PATTERNS = (
+    "config.json",
+    "generation_config.json",
+    "model.safetensors.index.json",
+    "model-00001-of-00002.safetensors",
+    "model-00002-of-00002.safetensors",
+    "tokenizer.json",
+    "tokenizer.model",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "LICENSE.txt",
+    "USE_POLICY.md",
+)
 
 _DATASET_IDS = {
     "wikitext": "modelscope/wikitext",
@@ -33,9 +53,12 @@ def modelscope_model_path(model, cache_dir=None, force_download=False):
     if Path(model).exists():
         return model
 
-    candidates = _MODEL_ALIASES.get(model.lower(), (model,))
+    alias = _MODEL_ALIASES.get(model.lower())
+    cache_candidates = alias["cache"] if alias else (model,)
+    download_candidates = alias["download"] if alias else (model,)
+
     if not force_download:
-        for candidate in candidates:
+        for candidate in cache_candidates:
             cached = _find_modelscope_model_snapshot(candidate, cache_dir)
             if cached is not None:
                 print(f"Using cached ModelScope model snapshot: {cached}")
@@ -44,18 +67,13 @@ def modelscope_model_path(model, cache_dir=None, force_download=False):
     from modelscope import snapshot_download
 
     errors = []
-    for candidate in candidates:
+    for candidate in download_candidates:
         try:
-            allow_patterns = None
-            if candidate == "shakechen/Llama-2-7b-hf":
-                allow_patterns = [
-                    "*.safetensors", "*.json", "tokenizer.model",
-                    "LICENSE.txt", "USE_POLICY.md",
-                ]
-            kwargs = {"cache_dir": cache_dir}
-            if allow_patterns is not None:
-                kwargs["allow_patterns"] = allow_patterns
-            return snapshot_download(candidate, **kwargs)
+            return snapshot_download(
+                candidate,
+                cache_dir=cache_dir,
+                allow_patterns=_LLAMA_DOWNLOAD_PATTERNS,
+            )
         except Exception as error:
             errors.append(f"{candidate}: {error}")
     raise RuntimeError(
