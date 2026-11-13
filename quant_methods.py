@@ -59,6 +59,8 @@ def add_method_args(parser):
 
 def resolve_method(args):
     """把 `--nearest` / `--quant_method` 归一化成方法名；wbits>=16 返回 None。"""
+    if getattr(args, 'w8a8', False):
+        return None
     if args.wbits >= 16:
         return None
     method = getattr(args, 'quant_method', None)
@@ -192,6 +194,10 @@ def quantize_block(layer, inps, outs, fwd, method, args,
 
     返回 layer 内每个 Linear 的 Quantizer 字典（key 是 block 内的局部名字）。
     """
+    if method == 'smoothquant':
+        from smoothquant import quantize_block_w8a8
+        return quantize_block_w8a8(layer, inps, outs, fwd, args, layer_idx=layer_idx)
+
     print(f'[quant] layer {layer_idx}: method={method}')
     linears = find_layers(layer)
     transform = method in ('awq', 'awq_gptq')

@@ -10,6 +10,7 @@ from modelutils import *
 from modelscope_utils import modelscope_model_path
 from quant import *
 from quant_methods import add_method_args, check_save_supported, pack_model, quantize_block, resolve_method
+from smoothquant import add_smoothquant_args, validate_smoothquant_args
 
 
 def get_bloom(model):
@@ -80,7 +81,8 @@ def bloom_sequential(model, dataloader, dev, means=None, stds=None):
 
         # 统一驱动：标定(可选) -> AWQ 等价变换(可选) -> 量化 -> 重算该层输出
         layer_quantizers = quantize_block(
-            layer, inps, outs, fwd, args.quant_method, args,
+            layer, inps, outs, fwd,
+            'smoothquant' if args.w8a8 else args.quant_method, args,
             layer_idx=i,
             layer_kwargs={'attention_mask': attention_mask, 'alibi': alibi},
         )
@@ -245,15 +247,19 @@ if __name__ == '__main__':
         help='Whether to use the new PTB and C4 eval'
     )
     add_method_args(parser)
+    add_smoothquant_args(parser)
 
 
     args = parser.parse_args()
     try:
         # --nearest / --quant_method 归一化：rtn / gptq / awq / awq_gptq
+        validate_smoothquant_args(args)
         args.quant_method = resolve_method(args)
+        if args.w8a8:
+            args.quant_method = 'smoothquant'
         # 尽早检查 --save（3-bit 打包）与所选方法/分组是否兼容，避免量化跑完才报错
         check_save_supported(args, args.quant_method)
-    except NotImplementedError as err:
+    except (NotImplementedError, ValueError) as err:
         parser.error(str(err))
 
     model = get_bloom(args.model)
@@ -263,7 +269,7 @@ if __name__ == '__main__':
         args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
     )
 
-    if args.wbits < 16:
+    if args.wbits < 16 or args.w8a8:
         tick = time.time()
         quantizers = bloom_sequential(model, dataloader, DEV)
         print(time.time() - tick)

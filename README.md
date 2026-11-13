@@ -85,6 +85,11 @@ Notes:
   `--wbits 3 --groupsize -1`.
 * The scripts under `zeroShot/` keep their own copies of the OPT/BLOOM drivers and only
   support the RTN (`--nearest`) and GPTQ paths.
+* `opt.py`, `bloom.py`, and `llama.py` also support an isolated SmoothQuant W8A8
+  accuracy path with `--w8a8`. It keeps `--wbits 16`, smooths activation outliers
+  into paired norms/weights, and simulates per-channel INT8 weights plus
+  per-token dynamic INT8 activations. This path is for perplexity validation and
+  does not yet use a packed INT8 kernel.
 
 ```bash
 # one method at a time (OPT)
@@ -100,7 +105,13 @@ CUDA_VISIBLE_DEVICES=0 python bloom.py bigscience/bloom-560m c4 --wbits 4 --quan
 # FP16 / RTN / GPTQ / AWQ in one shot (shared results.csv)
 CUDA_VISIBLE_DEVICES=0 python run_llama_experiments.py c4 --wbits 4 --true-sequential --act-order --new-eval
 
-# CPU-only sanity check of the RTN/GPTQ/AWQ plumbing (no checkpoint needed)
+# SmoothQuant W8A8 numerical validation (fake-INT8 matmul)
+CUDA_VISIBLE_DEVICES=0 python opt.py facebook/opt-125m c4 --w8a8 --smooth-alpha 0.5
+CUDA_VISIBLE_DEVICES=0 python llama.py LLAMA_HF_FOLDER c4 --w8a8 --smooth-alpha 0.5
+CUDA_VISIBLE_DEVICES=0 python bloom.py bigscience/bloom-560m c4 --w8a8 --smooth-alpha 0.5
+
+# CPU-only sanity checks (no checkpoint needed)
+python test_smoothquant.py
 python test_awq.py
 ```
 
