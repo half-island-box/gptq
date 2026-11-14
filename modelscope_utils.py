@@ -203,6 +203,74 @@ def _find_modelscope_dataset_snapshot(dataset_id, relative_files, cache_dir=None
     return None
 
 
+
+def _load_wikitext_without_script(name, split, cache_dir=None):
+    """Load WikiText without executing its legacy dataset script.
+
+    Newer ``datasets`` releases no longer support script-based datasets. The
+    ModelScope WikiText mirror is exactly such a dataset, but its script points
+    to plain zip archives that can be read directly.
+    """
+    from datasets import Dataset
+
+    # ModelScope's older loader may already have materialized arrow files. Reuse
+    # them when present; otherwise fetch the source archive referenced by the
+    # original dataset script.
+    if split == "validation":
+        arrow_split = "validation"
+    else:
+        arrow_split = split
+    for cache_root in _modelscope_cache_roots(cache_dir):
+        dataset_root = cache_root / "datasets" / "wikitext" / name
+        for arrow in dataset_root.glob(f"1.0.0/*/wikitext-{arrow_split}.arrow"):
+            if arrow.stat().st_size == 0:
+                continue
+            print(f"Using cached WikiText arrow file: {arrow}")
+            return Dataset.from_file(str(arrow))
+
+    from urllib.request import urlopen
+    from zipfile import ZipFile
+
+    valid_names = {
+        "wikitext-2-v1", "wikitext-2-raw-v1",
+        "wikitext-103-v1", "wikitext-103-raw-v1",
+    }
+    if name not in valid_names:
+        raise ValueError(f"Unsupported WikiText configuration: {name}")
+    split_names = {
+        "train": "wiki.train",
+        "validation": "wiki.valid",
+        "test": "wiki.test",
+    }
+    if split not in split_names:
+        raise ValueError(f"Unsupported WikiText split: {split}")
+
+    dataset_dir = name.removesuffix("-v1")
+    extension = "raw" if name.endswith("-raw-v1") else "tokens"
+    member = f"{dataset_dir}/{split_names[split]}.{extension}"
+    url = f"https://modelscope-open.oss-cn-hangzhou.aliyuncs.com/wikitext/{name}.zip"
+
+    # Keep the small source zip so train/test/validation do not download it 3 times.
+    download_root = (
+        Path(cache_dir).expanduser() / "datasets" / "wikitext-source"
+        if cache_dir is not None else
+        Path.home() / ".cache" / "modelscope" / "datasets" / "wikitext-source"
+    )
+    download_root.mkdir(parents=True, exist_ok=True)
+    archive_path = download_root / f"{name}.zip"
+    if not archive_path.is_file() or archive_path.stat().st_size == 0:
+        with urlopen(url) as source, archive_path.open("wb") as target:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                target.write(chunk)
+
+    with ZipFile(archive_path) as archive:
+        with archive.open(member) as source:
+            text = source.read().decode("utf-8")
+    return Dataset.from_dict({"text": text.splitlines()})
+
 def load_modelscope_dataset(
     path,
     name=None,
@@ -214,6 +282,9 @@ def load_modelscope_dataset(
 ):
     """Load a ModelScope dataset using the project's Hugging Face names."""
     dataset_id = _DATASET_IDS.get(path, path)
+
+    if path == "wikitext":
+        return _load_wikitext_without_script(name, split, cache_dir)
 
     if path == "allenai/c4" and data_files:
         # ModelScope 1.18's dataset loader ignores the single-shard data_files
